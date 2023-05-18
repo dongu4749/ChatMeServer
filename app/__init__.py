@@ -3,6 +3,10 @@ import torch
 from transformers import PreTrainedTokenizerFast, GPT2LMHeadModel
 import mysql.connector
 from datetime import datetime
+import base64
+from io import BytesIO
+from PIL import Image
+import io
 
 app = Flask(__name__)
 
@@ -123,6 +127,15 @@ def get_chat_history():
                 'isUser': row[3],
                 'time': row[4].strftime('%Y-%m-%d %H:%M:%S')
             }
+            if row[5] is not None:
+                # 이미지가 있는 경우 이미지를 Base64 인코딩하여 추가
+                image_data = row[5]
+                image_base64 = base64.b64encode(image_data).decode('utf-8')
+                message['image'] = image_base64
+            else:
+                # 이미지가 없는 경우 텍스트 메시지를 추가
+                message['content'] = row[2]
+
             chat_history.append(message)
 
         return jsonify({'chat_history': chat_history})
@@ -134,7 +147,71 @@ def get_chat_history():
     finally:
         # MySQL 연결 종료
         cursor.close()
+        conn.close()        
+
+@app.route('/photo', methods=['POST'])
+def upload_photo():
+    try:
+        data = request.get_json()
+        image_base64 = data['image']
+        user_id = data['id']
+        
+        # 이미지 Base64 디코딩
+        image_data = base64.b64decode(image_base64)
+        
+        # 이미지를 Pillow Image 객체로 열고, 크기 조정
+        image = Image.open(io.BytesIO(image_data))
+        image = image.resize((640, 640))
+        
+        # 다시 이미지 데이터로 인코딩
+        buffered = io.BytesIO()
+        image.save(buffered, format="JPEG")
+        image_data = buffered.getvalue()
+
+        # 이미지 데이터를 데이터베이스에 저장
+        conn = mysql.connector.connect(
+            host="localhost",
+            user="root",
+            password="root",
+            database="chatme"
+        )
+        cursor = conn.cursor()
+        current_user_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        sql = "INSERT INTO message (user_id, isUser, time, image) VALUES (%s, %s, %s, %s)"
+        val = (user_id, False, current_user_time, image_data)
+        cursor.execute(sql, val)
+        conn.commit()
+
+        # 삽입된 사진의 ID 조회
+        photo_id = cursor.lastrowid
+
+        # 삽입된 사진 조회 및 반환
+        sql = "SELECT image FROM message WHERE num = %s"
+        val = (photo_id,)
+        cursor.execute(sql, val)
+        result = cursor.fetchone()
+
+        # 이미지 데이터가 있으면 Base64 인코딩하여 반환
+        if result is not None:
+            photo_data = result[0]
+            photo_base64 = base64.b64encode(photo_data).decode('utf-8')
+            response = {
+                'photo_id': photo_id,
+                'image': photo_base64
+            }
+            return jsonify(response)
+        else:
+            return "사진을 찾을 수 없습니다."
+
+    except Exception as e:
+        print(e)
+        return "Error occurred", 500
+
+    finally:
+        # MySQL 연결 종료
+        cursor.close()
         conn.close()
+
 
 def generate_response(input_text, max_length=20):
     input_ids = tokenizer.encode(input_text, return_tensors="pt").to(device)
