@@ -147,7 +147,63 @@ def get_chat_history():
     finally:
         # MySQL 연결 종료
         cursor.close()
-        conn.close()        
+        conn.close()
+
+@app.route('/get_photo', methods=['POST'])
+def get_photo():
+    try:
+        user_id = request.json.get('user_id')
+        year = request.json.get('year')
+        month = request.json.get('month')
+        dayOfMonth = request.json.get('dayOfMonth')
+
+        conn = mysql.connector.connect(
+            host="localhost",
+            user="root",
+            password="root",
+            database="chatme"
+        )
+        cursor = conn.cursor()
+
+        # 해당 날짜에 해당하는 이미지 조회
+        sql = "SELECT * FROM message WHERE user_id = %s AND DATE(time) = %s"
+        val = (user_id, f"{year}-{month:02d}-{dayOfMonth:02d}")
+        cursor.execute(sql, val)
+        result = cursor.fetchall()
+    
+    # 조회된 결과를 JSON 형식으로 변환하여 반환
+        photo_history = []
+        for row in result:
+            message = {
+                'num': row[0],
+                'user_id': row[1],
+                'content': row[2],
+                'isUser': row[3],
+                'time': row[4].strftime('%Y-%m-%d %H:%M:%S')
+            }
+            if row[5] is not None:
+                # 이미지가 있는 경우 이미지를 Base64 인코딩하여 추가
+                image_data = row[5]
+                image_base64 = base64.b64encode(image_data).decode('utf-8')
+                message['image'] = image_base64
+            else:
+                # 이미지가 없는 경우 텍스트 메시지를 추가
+                message['content'] = row[2]
+
+            photo_history.append(message)
+
+        return jsonify({'photo_history': photo_history})
+
+    except Exception as e:
+        print(e)
+        return "Error occurred", 500
+
+    finally:
+        # MySQL 연결 종료
+        cursor.close()
+        conn.close()
+
+
 
 @app.route('/photo', methods=['POST'])
 def upload_photo():
@@ -211,8 +267,7 @@ def upload_photo():
         # MySQL 연결 종료
         cursor.close()
         conn.close()
-
-
+    
 def generate_response(input_text, max_length=20):
     input_ids = tokenizer.encode(input_text, return_tensors="pt").to(device)
     output = model.generate(input_ids, max_length=max_length, num_return_sequences=1)
