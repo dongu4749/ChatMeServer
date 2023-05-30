@@ -36,7 +36,8 @@ def signup():
         host="localhost",
         user="root",
         password="root",
-        database="chatme"
+        database="chatme",
+        auth_plugin='mysql_native_password'
         )
         cursor = conn.cursor()
         
@@ -70,7 +71,8 @@ def chat():
     host="localhost",
     user="root",
     password="root",
-    database="chatme"
+    database="chatme",
+    auth_plugin='mysql_native_password'
     )
     cursor = conn.cursor()
     
@@ -105,7 +107,8 @@ def get_chat_history():
             host="localhost",
             user="root",
             password="root",
-            database="chatme"
+            database="chatme",
+            auth_plugin='mysql_native_password'
         )
         cursor = conn.cursor()
 
@@ -146,8 +149,11 @@ def get_chat_history():
 
     finally:
         # MySQL 연결 종료
-        cursor.close()
-        conn.close()
+        if 'cursor' in locals():
+            cursor.close()
+        if 'conn' in locals():
+            conn.close()
+
 
 @app.route('/get_photo', methods=['POST'])
 def get_photo():
@@ -161,7 +167,8 @@ def get_photo():
             host="localhost",
             user="root",
             password="root",
-            database="chatme"
+            database="chatme",
+            auth_plugin='mysql_native_password'
         )
         cursor = conn.cursor()
 
@@ -170,8 +177,8 @@ def get_photo():
         val = (user_id, f"{year}-{month:02d}-{dayOfMonth:02d}")
         cursor.execute(sql, val)
         result = cursor.fetchall()
-    
-    # 조회된 결과를 JSON 형식으로 변환하여 반환
+
+        # 조회된 결과를 JSON 형식으로 변환하여 반환
         photo_history = []
         for row in result:
             message = {
@@ -200,8 +207,11 @@ def get_photo():
 
     finally:
         # MySQL 연결 종료
-        cursor.close()
-        conn.close()
+        if 'cursor' in locals():
+            cursor.close()
+        if 'conn' in locals():
+            conn.close()
+
 
 
 
@@ -229,7 +239,8 @@ def upload_photo():
             host="localhost",
             user="root",
             password="root",
-            database="chatme"
+            database="chatme",
+            auth_plugin='mysql_native_password'
         )
         cursor = conn.cursor()
         current_user_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
