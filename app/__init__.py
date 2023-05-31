@@ -1,16 +1,17 @@
 from flask import Flask, request, jsonify, render_template
-import torch
-from transformers import PreTrainedTokenizerFast, GPT2LMHeadModel
-import mysql.connector
-from datetime import datetime
-import base64
 from io import BytesIO
 from PIL import Image
+from datetime import datetime
+from transformers import PreTrainedTokenizerFast, GPT2LMHeadModel, AutoTokenizer, AutoModelForSequenceClassification
+import mysql.connector
+import torch
+import base64
+import numpy as np
 import io
+import torch.nn as nn
+import torch.nn.functional as F
 
 app = Flask(__name__)
-
-
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -21,6 +22,17 @@ model.load_state_dict(torch.load(model_path, map_location=device))
 model.to(device)
 model.eval()
 
+# 모델 및 토크나이저 로드
+bert_tokenizer = AutoTokenizer.from_pretrained("skt/kobert-base-v1")
+bert_model = AutoModelForSequenceClassification.from_pretrained("skt/kobert-base-v1", num_labels=7)
+
+# 저장된 체크포인트
+ckpt_name = "C:/Users/dongu/Downloads/saved_model_kobert.pt2"
+
+# 체크포인트 로드
+checkpoint = torch.load(ckpt_name, map_location=torch.device('cpu'))
+bert_model.load_state_dict(checkpoint['model_state_dict'])
+bert_model.eval()
 
 @app.route('/')
 def index():
@@ -278,12 +290,70 @@ def upload_photo():
         # MySQL 연결 종료
         cursor.close()
         conn.close()
+
+@app.route('/emotion', methods=['POST'])
+def get_emotion():
+    try:
+        # 클라이언 = request.json.get('year')
+        user_id = request.json.get('user_id')
+        year = request.json.get('year')
+        month = request.json.get('month')
+        dayOfMonth = request.json.get('dayOfMonth')
+        isUser = True
+
+        # 데이터베이스 연결 설정
+        conn = mysql.connector.connect(
+            host="localhost",
+            user="root",
+            password="root",
+            database="chatme",
+            auth_plugin='mysql_native_password'
+        )
+        cursor = conn.cursor()
+
+         # 해당 날짜의 메시지를 선택합니다.
+        sql = "SELECT content FROM message WHERE user_id = %s AND isUser = %s AND DATE(time) = %s"
+        val = (user_id, isUser, f"{year}-{month:02d}-{dayOfMonth:02d}")
+        cursor.execute(sql, val)
+        result = cursor.fetchall()
+
+        # 메시지를 순회하며 모델에 입력해 결과값을 가져옵니다.
+        emotion_results = []
+        for row in result:
+            content = row[0]
+            if content:  # 메시지가 비어 있지 않은 경우에만 전처리하고 모델에 입력합니다.
+                # 여기를 수정했습니다. 리스트 대신 단일 텍스트를 전달합니다.
+                emotion_idx = predict_emotion(content)
+                emotion_results.append(emotion_idx)
+
+        cursor.close()  
+        conn.close()
+
+        # 감정 분석 결과를 jsonify를 이용하여 json 형태로 반환
+        return jsonify({'emotion_results': emotion_results})
+    except Exception as e:
+        # 오류 발생 시 오류 메시지 반환
+        return jsonify({'error': str(e)})
+
     
 def generate_response(input_text, max_length=20):
     input_ids = tokenizer.encode(input_text, return_tensors="pt").to(device)
     output = model.generate(input_ids, max_length=max_length, num_return_sequences=1)
     response = tokenizer.decode(output[0], skip_special_tokens=True)
     return response
+
+def predict_emotion(sentence):
+    inputs = bert_tokenizer.encode_plus(sentence, add_special_tokens=True, padding='longest', truncation=True, return_tensors='pt')
+    input_ids = inputs['input_ids'].to(device)
+    attention_mask = inputs['attention_mask'].to(device)
+
+    with torch.no_grad():
+        outputs = bert_model(input_ids, attention_mask=attention_mask)
+
+    logits = outputs.logits
+    predicted_label = torch.argmax(logits, dim=1).item()
+
+    return str(predicted_label)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
