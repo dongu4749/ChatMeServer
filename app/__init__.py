@@ -15,10 +15,18 @@ app = Flask(__name__)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-tokenizer = PreTrainedTokenizerFast.from_pretrained("skt/kogpt2-base-v2")
-model_path = "C:/Users/dongu/Downloads/kogpt2_model.pth"  
+tokenizer = PreTrainedTokenizerFast.from_pretrained("skt/kogpt2-base-v2")  
+model_path = "C:/Users/dongu/Downloads/model_-epoch=00-train_loss=20.72.ckpt" 
 model = GPT2LMHeadModel.from_pretrained("skt/kogpt2-base-v2")
-model.load_state_dict(torch.load(model_path, map_location=device))
+gpt_checkpoint = torch.load(model_path, map_location=device)
+# 현재 가중치 키를 새로운 가중치 키로 수정
+fixed_state_dict = {}
+for key in gpt_checkpoint["state_dict"].keys():
+    new_key = key.replace("kogpt2.", "")
+    fixed_state_dict[new_key] = gpt_checkpoint["state_dict"][key]
+
+# 수정한 가중치 키로 모델의 가중치를 로드
+model.load_state_dict(fixed_state_dict)
 model.to(device)
 model.eval()
 
