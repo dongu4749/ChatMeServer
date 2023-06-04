@@ -2,7 +2,7 @@ from flask import Flask, request, jsonify, render_template
 from io import BytesIO
 from PIL import Image
 from datetime import datetime
-from transformers import PreTrainedTokenizerFast, GPT2LMHeadModel, AutoTokenizer, AutoModelForSequenceClassification
+from transformers import PreTrainedTokenizerFast, GPT2LMHeadModel, AutoTokenizer, AutoModelForSequenceClassification, BertForSequenceClassification, pipeline
 import mysql.connector
 import torch
 import base64
@@ -16,7 +16,7 @@ app = Flask(__name__)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 tokenizer = PreTrainedTokenizerFast.from_pretrained("skt/kogpt2-base-v2")  
-model_path = "C:/Users/dongu/Downloads/model_-epoch=00-train_loss=20.72.ckpt" 
+model_path = "C:/Users/dongu/Downloads/model_-epoch=20-train_loss=17.05.ckpt" 
 model = GPT2LMHeadModel.from_pretrained("skt/kogpt2-base-v2")
 gpt_checkpoint = torch.load(model_path, map_location=device)
 # 현재 가중치 키를 새로운 가중치 키로 수정
@@ -32,15 +32,22 @@ model.eval()
 
 # 모델 및 토크나이저 로드
 bert_tokenizer = AutoTokenizer.from_pretrained("skt/kobert-base-v1")
-bert_model = AutoModelForSequenceClassification.from_pretrained("skt/kobert-base-v1", num_labels=7)
+bert_model = BertForSequenceClassification.from_pretrained("skt/kobert-base-v1", num_labels=7)
 
 # 저장된 체크포인트
-ckpt_name = "C:/Users/dongu/Downloads/saved_model_kobert.pt2"
-
+ckpt_name = "C:/Users/dongu/Downloads/kobert_.pt2"
 # 체크포인트 로드
 checkpoint = torch.load(ckpt_name, map_location=torch.device('cpu'))
 bert_model.load_state_dict(checkpoint['model_state_dict'])
 bert_model.eval()
+
+
+diary_summary_model = "jx7789/kobart_summary_v2"
+
+gen_kwargs = {"length_penalty": 2.0, "num_beams":8, "max_length": 128}
+
+pipe = pipeline("summarization", model=diary_summary_model)
+
 
 @app.route('/')
 def index():
@@ -343,6 +350,47 @@ def get_emotion():
         # 오류 발생 시 오류 메시지 반환
         return jsonify({'error': str(e)})
 
+
+@app.route('/diary', methods=['POST'])
+def diary_summary():
+    try:
+        # 클라이언 = request.json.get('year')
+        user_id = request.json.get('user_id')
+        year = request.json.get('year')
+        month = request.json.get('month')
+        dayOfMonth = request.json.get('dayOfMonth')
+        isUser = True
+
+        # 데이터베이스 연결 설정
+        conn = mysql.connector.connect(
+            host="localhost",
+            user="root",
+            password="root",
+            database="chatme",
+            auth_plugin='mysql_native_password'
+        )
+        cursor = conn.cursor()
+
+         # 해당 날짜의 메시지를 선택합니다.
+        sql = "SELECT content FROM message WHERE user_id = %s AND isUser = %s AND DATE(time) = %s"
+        val = (user_id, isUser, f"{year}-{month:02d}-{dayOfMonth:02d}")
+        cursor.execute(sql, val)
+        result = cursor.fetchall()
+
+        # 각 content를 컴마로 연결하여 하나의 문자열로 만듭니다.
+        joined_contents = ", ".join([row[0] for row in result])
+
+        diary_Summary = diary_summary(joined_contents)
+
+        cursor.close()  
+        conn.close()
+
+        # 감정 분석 결과를 jsonify를 이용하여 json 형태로 반환
+        return jsonify({'diary_Summary': diary_Summary})
+    except Exception as e:
+        # 오류 발생 시 오류 메시지 반환
+        return jsonify({'error': str(e)})
+
     
 def generate_response(input_text, max_length=20):
     input_ids = tokenizer.encode(input_text, return_tensors="pt").to(device)
@@ -362,6 +410,11 @@ def predict_emotion(sentence):
     predicted_label = torch.argmax(logits, dim=1).item()
 
     return str(predicted_label)
+
+def diary_summary(sentence):
+
+    dialogue = sentence
+    return pipe("[sep]".join(dialogue), **gen_kwargs)[0]["summary_text"]
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
