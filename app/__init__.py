@@ -2,7 +2,9 @@ from flask import Flask, request, jsonify, render_template
 from io import BytesIO
 from PIL import Image
 from datetime import datetime
-from transformers import PreTrainedTokenizerFast, GPT2LMHeadModel, AutoTokenizer, AutoModelForSequenceClassification, BertForSequenceClassification, pipeline
+from transformers import PreTrainedTokenizerFast, GPT2LMHeadModel, AutoTokenizer, AutoModelForSequenceClassification, pipeline
+from krwordrank.hangle import normalize
+from krwordrank.word import KRWordRank
 import mysql.connector
 import torch
 import base64
@@ -10,6 +12,10 @@ import numpy as np
 import io
 import torch.nn as nn
 import torch.nn.functional as F
+
+from konlpy.tag import Okt
+from collections import Counter
+
 
 app = Flask(__name__)
 
@@ -32,7 +38,7 @@ model.eval()
 
 # 모델 및 토크나이저 로드
 bert_tokenizer = AutoTokenizer.from_pretrained("skt/kobert-base-v1")
-bert_model = BertForSequenceClassification.from_pretrained("skt/kobert-base-v1", num_labels=7)
+bert_model = AutoModelForSequenceClassification.from_pretrained("skt/kobert-base-v1", num_labels=7)
 
 # 저장된 체크포인트
 ckpt_name = "C:/Users/dongu/Downloads/kobert_.pt2"
@@ -211,7 +217,7 @@ def get_photo():
             message = {
                 'num': row[0],
                 'user_id': row[1],
-                'content': row[2],
+                
                 'isUser': row[3],
                 'time': row[4].strftime('%Y-%m-%d %H:%M:%S')
             }
@@ -220,9 +226,6 @@ def get_photo():
                 image_data = row[5]
                 image_base64 = base64.b64encode(image_data).decode('utf-8')
                 message['image'] = image_base64
-            else:
-                # 이미지가 없는 경우 텍스트 메시지를 추가
-                message['content'] = row[2]
 
             photo_history.append(message)
 
@@ -390,6 +393,48 @@ def diary_summary():
     except Exception as e:
         # 오류 발생 시 오류 메시지 반환
         return jsonify({'error': str(e)})
+    
+@app.route('/keyword', methods=['POST'])
+def diary_keyword():
+    try:
+        # 클라이언 = request.json.get('year')
+        user_id = request.json.get('user_id')
+        year = request.json.get('year')
+        month = request.json.get('month')
+        dayOfMonth = request.json.get('dayOfMonth')
+        isUser = True
+
+        # 데이터베이스 연결 설정
+        conn = mysql.connector.connect(
+            host="localhost",
+            user="root",
+            password="root",
+            database="chatme",
+            auth_plugin='mysql_native_password'
+        )
+        cursor = conn.cursor()
+
+         # 해당 날짜의 메시지를 선택합니다.
+        sql = "SELECT content FROM message WHERE user_id = %s AND isUser = %s AND DATE(time) = %s"
+        val = (user_id, isUser, f"{year}-{month:02d}-{dayOfMonth:02d}")
+        cursor.execute(sql, val)
+        result = cursor.fetchall()
+
+        # 각 content를 컴마로 연결하여 하나의 문자열로 만듭니다.
+        joined_contents = ". ".join([row[0] for row in result])
+
+        keywords = extract_keywords(joined_contents)
+        # 키워드 값만 추출하여 리스트로 변환
+        keyword_list = [keyword[0] for keyword in keywords]
+
+        cursor.close()
+        conn.close()
+
+        # 감정 분석 결과를 jsonify를 이용하여 json 형태로 반환
+        return jsonify({'keyword': keyword_list})
+    except Exception as e:
+        # 오류 발생 시 오류 메시지 반환
+        return jsonify({'error': str(e)})
 
     
 def generate_response(input_text, max_length=20):
@@ -414,7 +459,43 @@ def predict_emotion(sentence):
 def diary_summary(sentence):
 
     dialogue = sentence
+    
     return pipe("[sep]".join(dialogue), **gen_kwargs)[0]["summary_text"]
+
+def extract_keywords(sentence):
+    texts = [sentence]  # 입력 문장을 리스트로 변환
+    texts = [normalize(text, english=True, number=True) for text in texts]
+
+    wordrank_extractor = KRWordRank(
+        min_count=1,  # 단어의 최소 출현 빈도수 (그래프 생성 시)
+        max_length=10,  # 단어의 최대 길이
+        verbose=True
+    )
+
+    beta = 0.85  # PageRank의 decaying factor beta
+    max_iter = 10
+
+    keywords, rank, graph = wordrank_extractor.extract(texts, beta, max_iter)
+
+    # 상위 3개의 키워드만 반환
+    top_keywords = sorted(keywords.items(), key=lambda x: x[1], reverse=True)[:3]
+    
+    return top_keywords
+def okt_keywords(sentence):
+    # 형태소 분석기 초기화
+    okt = Okt()
+
+    # 명사 추출
+    nouns = okt.nouns(sentence)
+
+    # 빈도수 계산
+    counter = Counter(nouns)
+
+    # 상위 3개의 키워드 선택
+    keywords = [noun for noun, freq in counter.most_common(3)]
+
+    return keywords
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
+    
