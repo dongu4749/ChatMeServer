@@ -3,8 +3,8 @@ from io import BytesIO
 from PIL import Image
 from datetime import datetime
 from transformers import PreTrainedTokenizerFast, GPT2LMHeadModel, AutoTokenizer, AutoModelForSequenceClassification, pipeline
-from krwordrank.hangle import normalize
-from krwordrank.word import KRWordRank
+from konlpy.tag import Okt
+from collections import Counter
 import mysql.connector
 import torch
 import base64
@@ -12,10 +12,17 @@ import numpy as np
 import io
 import torch.nn as nn
 import torch.nn.functional as F
-
-from konlpy.tag import Okt
-from collections import Counter
-
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
+import gluonnlp as nlp
+import numpy as np
+from tqdm import tqdm
+from tqdm.notebook import tqdm
+from kobert_tokenizer import KoBERTTokenizer
+from transformers import BertModel
+from transformers import AdamW
+from transformers.optimization import get_cosine_schedule_with_warmup
+from torch.utils.data import Dataset
 
 app = Flask(__name__)
 
@@ -36,16 +43,146 @@ model.load_state_dict(fixed_state_dict)
 model.to(device)
 model.eval()
 
-# 모델 및 토크나이저 로드
-bert_tokenizer = AutoTokenizer.from_pretrained("skt/kobert-base-v1")
-bert_model = AutoModelForSequenceClassification.from_pretrained("skt/kobert-base-v1", num_labels=7)
 
-# 저장된 체크포인트
-ckpt_name = "C:/Users/dongu/Downloads/kobert_.pt2"
-# 체크포인트 로드
-checkpoint = torch.load(ckpt_name, map_location=torch.device('cpu'))
+bert_tokenizer = KoBERTTokenizer.from_pretrained('skt/kobert-base-v1')
+bertmodel = BertModel.from_pretrained('skt/kobert-base-v1', return_dict=False)
+vocab = nlp.vocab.BERTVocab.from_sentencepiece(bert_tokenizer.vocab_file, padding_token='[PAD]')
+
+class BERTDataset(Dataset):#모델에 입력할 데이터를 처리
+    def __init__(self, dataset, sent_idx, label_idx, bert_tokenizer, vocab, max_len, pad, pair):
+        transform = nlp.data.BERTSentenceTransform(
+            bert_tokenizer, max_seq_length=max_len,vocab=vocab, pad=pad, pair=pair)
+
+        self.sentences = [transform([i[sent_idx]]) for i in dataset]
+        self.labels = [np.int32(i[label_idx]) for i in dataset]
+
+    def __getitem__(self, i):
+        return (self.sentences[i] + (self.labels[i], ))
+
+    def __len__(self):
+        return (len(self.labels))
+
+#cpu를 gpu를 사용하는 것으로 변경 가능.
+device = torch.device('cpu')
+#하이퍼파라미터
+max_len = 64
+batch_size = 64
+warmup_ratio = 0.1
+num_epochs = 15
+max_grad_norm = 1
+log_interval = 200
+learning_rate = 5e-5
+tok = bert_tokenizer.tokenize
+
+#클래스 수는 flask 서버에서 작동하실 때 반드시 같아야함.
+#bert 모델을 이용한 분류기 모델 클래스
+class BERTClassifier(nn.Module):
+    def __init__(self,
+                 bert,
+                 hidden_size = 768,
+                 num_classes=7,   ##클래스 수 조정##
+                 dr_rate=None,
+                 params=None):
+        super(BERTClassifier, self).__init__()
+        self.bert = bert
+        self.dr_rate = dr_rate
+                 
+        self.classifier = nn.Linear(hidden_size , num_classes)
+        if dr_rate:
+            self.dropout = nn.Dropout(p=dr_rate)
+    
+    def gen_attention_mask(self, token_ids, valid_length):
+        attention_mask = torch.zeros_like(token_ids)
+        for i, v in enumerate(valid_length):
+            attention_mask[i][:v] = 1
+        return attention_mask.float()
+
+    def forward(self, token_ids, valid_length, segment_ids):
+        attention_mask = self.gen_attention_mask(token_ids, valid_length)
+        
+        _, pooler = self.bert(input_ids = token_ids, token_type_ids = segment_ids.long(), attention_mask = attention_mask.float().to(token_ids.device))
+        if self.dr_rate:
+            out = self.dropout(pooler)
+        return self.classifier(out)
+
+
+#BERT 모델 불러오기
+bert_model = BERTClassifier(bertmodel,  dr_rate=0.5).to(device)
+
+#optimizer와 schedule 설정
+no_decay = ['bias', 'LayerNorm.weight']
+optimizer_grouped_parameters = [
+    {'params': [p for n, p in bert_model.named_parameters() if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
+    {'params': [p for n, p in bert_model.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
+]
+
+optimizer = AdamW(optimizer_grouped_parameters, lr=learning_rate)
+loss_fn = nn.CrossEntropyLoss()
+
+best_acc=0.0
+best_loss=99999999
+epoch = 0
+
+bert_model_path = "C:/Users/dongu/Downloads/saved_model_kobert.pt2"
+checkpoint = torch.load(bert_model_path, map_location=torch.device('cpu'))
 bert_model.load_state_dict(checkpoint['model_state_dict'])
-bert_model.eval()
+optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+epoch = checkpoint['epoch']
+
+
+def predict(predict_sentence):
+
+    data = [predict_sentence, '0']
+    dataset_another = [data]
+
+    another_test = BERTDataset(dataset_another, 0, 1, tok, vocab, max_len, True, False)
+    test_dataloader = torch.utils.data.DataLoader(another_test, batch_size=batch_size, num_workers=5)
+    
+    bert_model.eval()
+
+    for batch_id, (token_ids, valid_length, segment_ids, label) in enumerate(test_dataloader):
+        token_ids = token_ids.long().to(device)
+        segment_ids = segment_ids.long().to(device)
+
+        valid_length= valid_length
+        label = label.long().to(device)
+
+        out = bert_model(token_ids, valid_length, segment_ids)
+
+
+        test_eval=[]
+        for i in out:
+            logits=i
+            logits = logits.detach().cpu().numpy()
+
+            if np.argmax(logits) == 0:
+                test_eval.append("0")#중립
+            elif np.argmax(logits) == 1:
+                test_eval.append("1")#분노
+            elif np.argmax(logits) == 2:
+                test_eval.append("2")#기쁨
+            elif np.argmax(logits) == 3:
+                test_eval.append("3")#불안
+            elif np.argmax(logits) == 4:
+                test_eval.append("4")#놀람
+            elif np.argmax(logits) == 5:
+                test_eval.append("5")#슬픔
+            elif np.argmax(logits) == 6:
+                test_eval.append("6")#혐오
+
+        print(test_eval[0])
+        return test_eval[0]
+    
+# # 모델 및 토크나이저 로드
+# bert_tokenizer = AutoTokenizer.from_pretrained("skt/kobert-base-v1")
+# bert_model = AutoModelForSequenceClassification.from_pretrained("skt/kobert-base-v1", num_labels=7)
+
+# # 저장된 체크포인트
+# ckpt_name = "C:/Users/dongu/Downloads/kobert_.pt2"
+# # 체크포인트 로드
+# checkpoint = torch.load(ckpt_name, map_location=torch.device('cpu'))
+# bert_model.load_state_dict(checkpoint['model_state_dict'])
+# bert_model.eval()
 
 
 diary_summary_model = "jx7789/kobart_summary_v2"
@@ -341,7 +478,7 @@ def get_emotion():
             content = row[0]
             if content:  # 메시지가 비어 있지 않은 경우에만 전처리하고 모델에 입력합니다.
                 # 여기를 수정했습니다. 리스트 대신 단일 텍스트를 전달합니다.
-                emotion_idx = predict_emotion(content)
+                emotion_idx = predict(content)
                 emotion_results.append(emotion_idx)
 
         cursor.close()  
@@ -422,7 +559,7 @@ def diary_keyword():
 
         joined_contents = ' '.join([row[0] for row in result])
 
-        keywords = okt_keywords(joined_contents)
+        keywords = extract_keywords(joined_contents)
         # 키워드 값만 추출하여 리스트로 변환
         keyword_list = [keyword for keyword in keywords]
 
@@ -461,26 +598,7 @@ def diary_summary(sentence):
     
     return pipe("[sep]".join(dialogue), **gen_kwargs)[0]["summary_text"]
 
-def extract_keywords(sentence):
-    texts = [sentence]  # 입력 문장을 리스트로 변환
-    texts = [normalize(text, english=True, number=True) for text in texts]
-
-    wordrank_extractor = KRWordRank(
-        min_count=1,  # 단어의 최소 출현 빈도수 (그래프 생성 시)
-        max_length=10,  # 단어의 최대 길이
-        verbose=True
-    )
-
-    beta = 0.85  # PageRank의 decaying factor beta
-    max_iter = 10
-
-    keywords, rank, graph = wordrank_extractor.extract(texts, beta, max_iter)
-
-    # 상위 3개의 키워드만 반환
-    top_keywords = sorted(keywords.items(), key=lambda x: x[1], reverse=True)[:3]
-    
-    return top_keywords
-def okt_keywords(text):
+def extract_keywords(text):
     # Initialize the morphological analyzer
     okt = Okt()
 
