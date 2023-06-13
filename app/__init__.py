@@ -420,12 +420,11 @@ def diary_keyword():
         cursor.execute(sql, val)
         result = cursor.fetchall()
 
-        # 각 content를 컴마로 연결하여 하나의 문자열로 만듭니다.
-        joined_contents = ". ".join([row[0] for row in result])
+        joined_contents = ' '.join([row[0] for row in result])
 
-        keywords = extract_keywords(joined_contents)
+        keywords = okt_keywords(joined_contents)
         # 키워드 값만 추출하여 리스트로 변환
-        keyword_list = [keyword[0] for keyword in keywords]
+        keyword_list = [keyword for keyword in keywords]
 
         cursor.close()
         conn.close()
@@ -481,17 +480,17 @@ def extract_keywords(sentence):
     top_keywords = sorted(keywords.items(), key=lambda x: x[1], reverse=True)[:3]
     
     return top_keywords
-def okt_keywords(sentence):
-    # 형태소 분석기 초기화
+def okt_keywords(text):
+    # Initialize the morphological analyzer
     okt = Okt()
 
-    # 명사 추출
-    nouns = okt.nouns(sentence)
+    # Extract nouns
+    nouns = okt.nouns(text)
 
-    # 빈도수 계산
+    # Calculate frequencies
     counter = Counter(nouns)
 
-    # 상위 3개의 키워드 선택
+    # Select the top 5 keywords
     keywords = [noun for noun, freq in counter.most_common(3)]
 
     return keywords
